@@ -538,22 +538,22 @@ function getDirectionsRoute(pickup, dropoff) {
   });
 }
 
-// Returns the LatLng and heading at the halfway point (by distance) along the path.
-function routeMidpointInfo(points) {
+// Returns the LatLng and heading at a given fraction (0–1) along the path by distance.
+function routePointInfo(points, fraction) {
   const sph = google.maps.geometry.spherical;
   let total = 0;
   for (let i = 1; i < points.length; i++) total += sph.computeDistanceBetween(points[i-1], points[i]);
-  const half = total / 2;
+  const target = total * fraction;
   let acc = 0;
   for (let i = 1; i < points.length; i++) {
     const seg = sph.computeDistanceBetween(points[i-1], points[i]);
-    if (acc + seg >= half) {
-      const frac = (half - acc) / seg;
-      const midLat = points[i-1].lat() + (points[i].lat() - points[i-1].lat()) * frac;
-      const midLng = points[i-1].lng() + (points[i].lng() - points[i-1].lng()) * frac;
+    if (acc + seg >= target) {
+      const frac = (target - acc) / seg;
+      const lat = points[i-1].lat() + (points[i].lat() - points[i-1].lat()) * frac;
+      const lng = points[i-1].lng() + (points[i].lng() - points[i-1].lng()) * frac;
       return {
-        midPoint: new google.maps.LatLng(midLat, midLng),
-        heading:  sph.computeHeading(points[i-1], points[i]),
+        anchorPoint: new google.maps.LatLng(lat, lng),
+        heading:     sph.computeHeading(points[i-1], points[i]),
       };
     }
     acc += seg;
@@ -568,30 +568,32 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
   const { durationSecs: directSecs, points } = route;
   const targetSecs = directSecs + extraMinutes * 60;
 
-  const info = routeMidpointInfo(points);
+  // Pick a random position along the route (anywhere from 20% to 80% of the way).
+  const fraction = 0.2 + Math.random() * 0.6;
+  const info = routePointInfo(points, fraction);
   if (!info) return null;
 
-  const { midPoint, heading } = info;
+  const { anchorPoint, heading } = info;
   // Pick a random side (left or right of the road) and offset perpendicularly.
   const perpHeading = heading + (Math.random() < 0.5 ? 90 : -90);
   const sph = google.maps.geometry.spherical;
 
   function pointAt(r) {
-    const ll = sph.computeOffset(midPoint, r, perpHeading);
+    const ll = sph.computeOffset(anchorPoint, r, perpHeading);
     return { lat: ll.lat(), lng: ll.lng() };
   }
 
   let lo = 0, hi = Math.min(extraMinutes * 5000, 60000); // meters
   let bestPoint = null;
 
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 8; i++) {
     const r = (lo + hi) / 2;
     const p = pointAt(r);
     const [d1, d2] = await Promise.all([fetchDuration(pickup, p), fetchDuration(p, dropoff)]);
     if (d1 == null || d2 == null) break;
     bestPoint = p;
     const total = d1 + d2;
-    if (Math.abs(total - targetSecs) <= 60) break; // within 1 min, done
+    if (Math.abs(total - targetSecs) <= 20) break; // within 20 seconds, done
     if (total < targetSecs) lo = r; else hi = r;
   }
 
