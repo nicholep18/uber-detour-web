@@ -179,7 +179,15 @@
 
   <!-- ── Detour Mode panel ── -->
   <div id="detour-panel" class="hidden">
-    <p class="detour-hint">We'll pick a surprise stop 1–2 km from the midpoint of your journey.</p>
+    <p class="detour-hint">Enter extra minutes below to find a stop that adds exactly that time to your ride. Leave blank for a random stop.</p>
+    <div class="card" style="margin-bottom:12px;">
+      <div class="field-row">
+        <span style="font-size:14px;color:#555;flex:1;">Extra minutes for detour</span>
+        <input type="number" id="extra-minutes" min="1" max="120" placeholder="e.g. 7" autocomplete="off"
+          style="width:72px;text-align:right;border:none;outline:none;font-size:15px;font-weight:600;color:#111;background:transparent;font-family:inherit;" />
+        <span style="font-size:13px;color:#888;margin-left:4px;">min</span>
+      </div>
+    </div>
     <div class="card">
       <div class="field-wrap">
         <div class="field-row">
@@ -511,6 +519,41 @@ function openUber(uberWin, pickup, dropoff) {
   showToast(pickup.short_name, dropoff.short_name);
 }
 
+// ─── Find stop that adds N extra minutes ──────────────────────────────────────
+async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
+  const directSecs = await fetchDuration(pickup, dropoff);
+  if (directSecs == null) return null;
+
+  const targetSecs = directSecs + extraMinutes * 60;
+  const mid = midpoint(pickup, dropoff);
+  const angle = Math.random() * 2 * Math.PI;
+  const R = 6371000;
+  const cosLat = Math.cos(mid.lat * Math.PI / 180);
+
+  function pointAt(r) {
+    return {
+      lat: mid.lat + (r * Math.cos(angle) / R) * (180 / Math.PI),
+      lng: mid.lng + (r * Math.sin(angle) / (R * cosLat)) * (180 / Math.PI),
+    };
+  }
+
+  let lo = 50, hi = Math.min(extraMinutes * 5000, 60000); // meters
+  let bestPoint = pointAt((lo + hi) / 2);
+
+  for (let i = 0; i < 6; i++) {
+    const r = (lo + hi) / 2;
+    const p = pointAt(r);
+    const [d1, d2] = await Promise.all([fetchDuration(pickup, p), fetchDuration(p, dropoff)]);
+    if (d1 == null || d2 == null) break;
+    bestPoint = p;
+    const total = d1 + d2;
+    if (Math.abs(total - targetSecs) <= 60) break; // within 1 minute, good enough
+    if (total < targetSecs) lo = r; else hi = r;
+  }
+
+  return bestPoint;
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 async function handleOpenUber() {
   const originEl = document.getElementById('origin');
@@ -547,8 +590,20 @@ async function handleGenerateDetour() {
 
   try {
     const [pickup, dropoff] = await Promise.all([geocode(origin, originEl), geocode(dest, destEl)]);
-    const mid = midpoint(pickup, dropoff);
-    const { lat: sLat, lng: sLng } = randomNearbyPoint(mid.lat, mid.lng);
+
+    const extraMinRaw = parseFloat(document.getElementById('extra-minutes').value);
+    const extraMin = isFinite(extraMinRaw) && extraMinRaw > 0 ? extraMinRaw : null;
+
+    let sLat, sLng;
+    if (extraMin != null) {
+      const found = await findStopForExtraMinutes(pickup, dropoff, extraMin);
+      if (found) { sLat = found.lat; sLng = found.lng; }
+      else { const mid = midpoint(pickup, dropoff); ({ lat: sLat, lng: sLng } = randomNearbyPoint(mid.lat, mid.lng)); }
+    } else {
+      const mid = midpoint(pickup, dropoff);
+      ({ lat: sLat, lng: sLng } = randomNearbyPoint(mid.lat, mid.lng));
+    }
+
     const stop = await reverseGeocode(sLat, sLng);
 
     detourResult = { pickup, stop, dropoff };
