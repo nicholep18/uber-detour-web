@@ -521,80 +521,58 @@ function openUber(uberWin, pickup, dropoff) {
 
 // ─── Find stop that adds N extra minutes ──────────────────────────────────────
 
-// Returns { durationSecs, points[] } for the driving route, using Directions API.
-function getDirectionsRoute(pickup, dropoff) {
-  return new Promise(resolve => {
-    if (typeof google === 'undefined' || !google.maps?.DirectionsService) { resolve(null); return; }
-    new google.maps.DirectionsService().route({
-      origin:      new google.maps.LatLng(pickup.lat, pickup.lng),
-      destination: new google.maps.LatLng(dropoff.lat, dropoff.lng),
-      travelMode:  google.maps.TravelMode.DRIVING,
-    }, (result, status) => {
-      if (status !== 'OK') { resolve(null); return; }
-      const leg = result.routes[0].legs[0];
-      const points = leg.steps.flatMap(s => s.path); // LatLng[]
-      resolve({ durationSecs: leg.duration.value, points });
-    });
-  });
-}
-
-// Returns the LatLng and heading at a given fraction (0–1) along the path by distance.
-function routePointInfo(points, fraction) {
-  const sph = google.maps.geometry.spherical;
-  let total = 0;
-  for (let i = 1; i < points.length; i++) total += sph.computeDistanceBetween(points[i-1], points[i]);
-  const target = total * fraction;
-  let acc = 0;
-  for (let i = 1; i < points.length; i++) {
-    const seg = sph.computeDistanceBetween(points[i-1], points[i]);
-    if (acc + seg >= target) {
-      const frac = (target - acc) / seg;
-      const lat = points[i-1].lat() + (points[i].lat() - points[i-1].lat()) * frac;
-      const lng = points[i-1].lng() + (points[i].lng() - points[i-1].lng()) * frac;
-      return {
-        anchorPoint: new google.maps.LatLng(lat, lng),
-        heading:     sph.computeHeading(points[i-1], points[i]),
-      };
-    }
-    acc += seg;
-  }
-  return null;
-}
-
+/**
+ * Binary-searches for a stop perpendicular to the straight-line midpoint of
+ * the route so that driving origin→stop→dest takes at least `extraMinutes`
+ * more than the direct trip.
+ *
+ * Uses only the Distance Matrix JS API (no Directions API needed).
+ * Returns { lat, lng } or null if the API is unavailable.
+ */
 async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
-  const route = await getDirectionsRoute(pickup, dropoff);
-  if (!route) return null;
+  // Step 1: get the real direct driving duration to establish our target.
+  const directSecs = await fetchDuration(pickup, dropoff);
+  if (directSecs == null) return null;
 
-  const { durationSecs: directSecs, points } = route;
   const targetSecs = directSecs + extraMinutes * 60;
 
-  // Pick a random position along the route (anywhere from 20% to 80% of the way).
-  const fraction = 0.2 + Math.random() * 0.6;
-  const info = routePointInfo(points, fraction);
-  if (!info) return null;
-
-  const { anchorPoint, heading } = info;
-  // Pick a random side (left or right of the road) and offset perpendicularly.
-  const perpHeading = heading + (Math.random() < 0.5 ? 90 : -90);
+  // Step 2: fix an anchor (midpoint) and a perpendicular bearing.
   const sph = google.maps.geometry.spherical;
+  const anchor = new google.maps.LatLng(
+    (pickup.lat + dropoff.lat) / 2,
+    (pickup.lng + dropoff.lng) / 2,
+  );
+  const directHeading = sph.computeHeading(
+    new google.maps.LatLng(pickup.lat, pickup.lng),
+    new google.maps.LatLng(dropoff.lat, dropoff.lng),
+  );
+  // Randomly go left or right of the direct path.
+  const perpHeading = directHeading + (Math.random() < 0.5 ? 90 : -90);
 
   function pointAt(r) {
-    const ll = sph.computeOffset(anchorPoint, r, perpHeading);
+    const ll = sph.computeOffset(anchor, r, perpHeading);
     return { lat: ll.lat(), lng: ll.lng() };
   }
 
-  let lo = 0, hi = Math.min(extraMinutes * 5000, 60000); // meters
-  let bestPoint = null;
+  // Step 3: binary-search the perpendicular radius.
+  // hi is generous — 3 000 m per extra minute, capped at 50 km.
+  let lo = 0, hi = Math.min(extraMinutes * 3000, 50000);
+  let bestPoint = null; // only updated when total >= target
 
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 9; i++) {
     const r = (lo + hi) / 2;
     const p = pointAt(r);
     const [d1, d2] = await Promise.all([fetchDuration(pickup, p), fetchDuration(p, dropoff)]);
     if (d1 == null || d2 == null) break;
-    bestPoint = p;
     const total = d1 + d2;
-    if (Math.abs(total - targetSecs) <= 20) break; // within 20 seconds, done
-    if (total < targetSecs) lo = r; else hi = r;
+
+    if (total >= targetSecs) {
+      bestPoint = p; // this point satisfies the constraint
+      if (total - targetSecs <= 30) break; // within 30 s of target — good enough
+      hi = r; // overshoot: try a shorter radius
+    } else {
+      lo = r; // undershoot: try a longer radius
+    }
   }
 
   return bestPoint;
