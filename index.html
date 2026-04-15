@@ -272,6 +272,8 @@
 </div>
 
 <script>
+const MAPS_KEY = 'AIzaSyB46S7sLydEctc7OlpweJlknVkgk6JXcno';
+
 // ─── State ────────────────────────────────────────────────────────────────────
 let detourResult = null;
 let toastAddresses = { from: '', to: '' };
@@ -529,6 +531,28 @@ function openUber(uberWin, pickup, dropoff) {
  * Uses only the Distance Matrix JS API (no Directions API needed).
  * Returns { lat, lng } or null if the API is unavailable.
  */
+// ─── Roads API ───────────────────────────────────────────────────────────────
+
+/**
+ * Snaps a lat/lng to the nearest road using the Roads API.
+ * Returns the snapped { lat, lng } or null if unavailable.
+ */
+async function snapToRoad(lat, lng) {
+  try {
+    const res = await fetch(
+      `https://roads.googleapis.com/v1/snapToRoads` +
+      `?path=${lat.toFixed(7)},${lng.toFixed(7)}` +
+      `&interpolate=false&key=${MAPS_KEY}`
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const pt = data.snappedPoints?.[0]?.location;
+    return pt ? { lat: pt.latitude, lng: pt.longitude } : null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Directions API helpers ───────────────────────────────────────────────────
 
 /** Gets the actual driving route polyline + duration via the Directions API. */
@@ -640,7 +664,12 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
 
     for (let i = 0; i < 10; i++) {
       const r = (lo + hi) / 2;
-      const p = pointAt(r);
+      const raw = pointAt(r);
+
+      // Snap to nearest road — makes duration checks consistent and smooth.
+      const snapped = await snapToRoad(raw.lat, raw.lng);
+      const p = snapped ?? raw; // fall back to unsnapped if Roads API fails
+
       const [d1, d2] = await Promise.all([fetchDuration(pickup, p), fetchDuration(p, dropoff)]);
 
       if (d1 == null || d2 == null) {
