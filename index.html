@@ -616,29 +616,11 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
   // Step 1: get the real road polyline + direct duration.
   const route = await getDirectionsRoute(pickup, dropoff);
 
-  let directSecs, getAnchorInfo;
+  if (!route) return null;
 
-  if (route) {
-    directSecs = route.durationSecs;
-    // Anchor on the actual road at a random 30–70% fraction.
-    const fraction = 0.3 + Math.random() * 0.4;
-    getAnchorInfo = () => routePointInfo(route.points, fraction);
-  } else {
-    // Directions API unavailable — fall back to geographic midpoint.
-    const fallbackDirect = await fetchDuration(pickup, dropoff);
-    if (fallbackDirect == null) return null;
-    directSecs = fallbackDirect;
-    const sph = google.maps.geometry.spherical;
-    const mid = new google.maps.LatLng(
-      (pickup.lat + dropoff.lat) / 2,
-      (pickup.lng + dropoff.lng) / 2,
-    );
-    const heading = sph.computeHeading(
-      new google.maps.LatLng(pickup.lat, pickup.lng),
-      new google.maps.LatLng(dropoff.lat, dropoff.lng),
-    );
-    getAnchorInfo = () => ({ anchorPoint: mid, heading });
-  }
+  const directSecs = route.durationSecs;
+  const fraction = 0.3 + Math.random() * 0.4;
+  const getAnchorInfo = () => routePointInfo(route.points, fraction);
 
   const targetSecs = directSecs + extraMinutes * 60;
   const anchorInfo = getAnchorInfo();
@@ -737,8 +719,11 @@ async function handleGenerateDetour() {
     let sLat, sLng;
     if (extraMin != null) {
       const found = await findStopForExtraMinutes(pickup, dropoff, extraMin);
-      if (found) { sLat = found.lat; sLng = found.lng; }
-      else { const mid = midpoint(pickup, dropoff); ({ lat: sLat, lng: sLng } = randomNearbyPoint(mid.lat, mid.lng)); }
+      if (!found) {
+        alert(`Couldn't find a stop that adds ~${extraMin} minute${extraMin === 1 ? '' : 's'} to your route using real-time data. Try a different value or route.`);
+        return;
+      }
+      sLat = found.lat; sLng = found.lng;
     } else {
       const mid = midpoint(pickup, dropoff);
       ({ lat: sLat, lng: sLng } = randomNearbyPoint(mid.lat, mid.lng));
