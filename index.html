@@ -554,28 +554,28 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
 
   let bestPoint = null, bestD1 = null, bestD2 = null, bestDiff = Infinity;
 
-  // Try up to 4 random directions; move on to a new one if the current hits unreachable terrain.
-  for (let attempt = 0; attempt < 4 && Math.abs(bestDiff) > TOLERANCE_SECS; attempt++) {
-    const angle = Math.random() * 360;
-    let radius  = extraMinutes * 600;
+  let angle  = Math.random() * 360;
+  let radius = extraMinutes * 300; // ~half the per-minute driving distance as initial guess
 
-    for (let i = 0; i < MAX_ATTEMPTS; i++) {
-      const p = pointAt(angle, radius);
-      const [d1, d2] = await Promise.all([fetchDuration(pickup, p), fetchDuration(p, dropoff)]);
-      if (d1 == null || d2 == null) break; // unreachable — abandon this direction
+  for (let i = 0; i < MAX_ATTEMPTS && Math.abs(bestDiff) > TOLERANCE_SECS; i++) {
+    const p = pointAt(angle, radius);
+    const [d1, d2] = await Promise.all([fetchDuration(pickup, p), fetchDuration(p, dropoff)]);
 
-      const diff = d1 + d2 - targetSecs;
-
-      if (Math.abs(diff) < Math.abs(bestDiff)) {
-        bestPoint = p; bestD1 = d1; bestD2 = d2; bestDiff = diff;
-      }
-
-      if (Math.abs(diff) <= TOLERANCE_SECS) break;
-
-      // Scale radius proportionally to the time ratio so large misses converge fast
-      // and small misses converge precisely, with light damping to avoid oscillation.
-      radius *= Math.pow(targetSecs / (d1 + d2), 0.7);
+    if (d1 == null || d2 == null) {
+      // Unreachable terrain — rotate 45° and try again without consuming a "good" attempt.
+      angle = (angle + 45) % 360;
+      continue;
     }
+
+    const diff = d1 + d2 - targetSecs;
+
+    if (Math.abs(diff) < Math.abs(bestDiff)) {
+      bestPoint = p; bestD1 = d1; bestD2 = d2; bestDiff = diff;
+    }
+
+    // Scale radius proportionally; also rotate slightly each iteration to explore.
+    radius *= Math.pow(targetSecs / (d1 + d2), 0.7);
+    angle   = (angle + (Math.random() < 0.3 ? 30 : 0)) % 360;
   }
 
   if (bestPoint && Math.abs(bestDiff) <= TOLERANCE_SECS) {
