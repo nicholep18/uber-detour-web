@@ -545,8 +545,8 @@ function openUber(uberWin, pickup, dropoff) {
  * until the detour matches the target within ~1.5 minutes.
  */
 async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
-  const TOLERANCE_SECS = 90;
-  const MAX_ATTEMPTS   = 20;
+  const TOLERANCE_SECS = 60;
+  const MAX_ATTEMPTS   = 25;
 
   const directSecs = await fetchDuration(pickup, dropoff);
   if (directSecs == null) return null;
@@ -580,8 +580,9 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
 
     if (Math.abs(diff) <= TOLERANCE_SECS) break;
 
-    // Scale radius proportionally: if detour is too short go further, too long come closer.
-    radius *= diff < 0 ? 1.5 : 0.6;
+    // Scale radius proportionally to the time ratio so large misses converge fast
+    // and small misses converge precisely, with light damping to avoid oscillation.
+    radius *= Math.pow(targetSecs / (d1 + d2), 0.7);
   }
 
   if (bestPoint && Math.abs(bestDiff) <= TOLERANCE_SECS) {
