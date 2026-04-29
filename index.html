@@ -542,13 +542,20 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
   if (directSecs == null) return null;
 
   const targetSecs = directSecs + extraMinutes * 60;
-  const mid = { lat: (pickup.lat + dropoff.lat) / 2, lng: (pickup.lng + dropoff.lng) / 2 };
+
+  // For small detours on long trips, anchor near the origin so the search starts
+  // in a region where small radii can actually produce the right extra time.
+  const anchorFraction = Math.min(0.5, Math.max(0.05, (extraMinutes / (directSecs / 60)) * 0.5));
+  const anchor = {
+    lat: pickup.lat + anchorFraction * (dropoff.lat - pickup.lat),
+    lng: pickup.lng + anchorFraction * (dropoff.lng - pickup.lng),
+  };
 
   function pointAt(angleDeg, radiusM) {
     const R = 6371000, a = angleDeg * Math.PI / 180;
     return {
-      lat: mid.lat + (radiusM * Math.cos(a) / R) * (180 / Math.PI),
-      lng: mid.lng + (radiusM * Math.sin(a) / (R * Math.cos(mid.lat * Math.PI / 180))) * (180 / Math.PI),
+      lat: anchor.lat + (radiusM * Math.cos(a) / R) * (180 / Math.PI),
+      lng: anchor.lng + (radiusM * Math.sin(a) / (R * Math.cos(anchor.lat * Math.PI / 180))) * (180 / Math.PI),
     };
   }
 
