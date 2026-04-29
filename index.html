@@ -618,7 +618,10 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
 
   if (!route) return null;
 
-  const directSecs = route.durationSecs;
+  // Use the same API as the leg checks so the baseline and detour times are comparable.
+  const directSecs = await fetchDuration(pickup, dropoff);
+  if (directSecs == null) return null;
+
   const fraction = 0.3 + Math.random() * 0.4;
   const getAnchorInfo = () => routePointInfo(route.points, fraction);
 
