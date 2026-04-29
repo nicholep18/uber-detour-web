@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Open Uber</title>
-  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB46S7sLydEctc7OlpweJlknVkgk6JXcno&libraries=geometry"></script>
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB46S7sLydEctc7OlpweJlknVkgk6JXcno"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -537,151 +537,56 @@ function openUber(uberWin, pickup, dropoff) {
  * Uses only the Distance Matrix JS API (no Directions API needed).
  * Returns { lat, lng } or null if the API is unavailable.
  */
-// ─── Roads API ───────────────────────────────────────────────────────────────
-
-/**
- * Snaps a lat/lng to the nearest road using the Roads API.
- * Returns the snapped { lat, lng } or null if unavailable.
- */
-async function snapToRoad(lat, lng) {
-  try {
-    const res = await fetch(
-      `https://roads.googleapis.com/v1/snapToRoads` +
-      `?path=${lat.toFixed(7)},${lng.toFixed(7)}` +
-      `&interpolate=false&key=${MAPS_KEY}`
-    );
-    if (!res.ok) return null;
-    const data = await res.json();
-    const pt = data.snappedPoints?.[0]?.location;
-    return pt ? { lat: pt.latitude, lng: pt.longitude } : null;
-  } catch {
-    return null;
-  }
-}
-
-// ─── Directions API helpers ───────────────────────────────────────────────────
-
-/** Gets the actual driving route polyline + duration via the Directions API. */
-function getDirectionsRoute(pickup, dropoff) {
-  return new Promise(resolve => {
-    if (typeof google === 'undefined' || !google.maps?.DirectionsService) { resolve(null); return; }
-    new google.maps.DirectionsService().route({
-      origin:      new google.maps.LatLng(pickup.lat, pickup.lng),
-      destination: new google.maps.LatLng(dropoff.lat, dropoff.lng),
-      travelMode:  google.maps.TravelMode.DRIVING,
-    }, (result, status) => {
-      if (status !== 'OK') { resolve(null); return; }
-      const leg = result.routes[0].legs[0];
-      resolve({
-        durationSecs: leg.duration.value,
-        points: leg.steps.flatMap(s => s.path), // actual road LatLng[]
-      });
-    });
-  });
-}
-
-/**
- * Walks the road polyline by cumulative distance and returns the LatLng and
- * road heading at the given fraction (0–1) of total route length.
- */
-function routePointInfo(points, fraction) {
-  const sph = google.maps.geometry.spherical;
-  let total = 0;
-  for (let i = 1; i < points.length; i++) total += sph.computeDistanceBetween(points[i-1], points[i]);
-  const target = total * fraction;
-  let acc = 0;
-  for (let i = 1; i < points.length; i++) {
-    const seg = sph.computeDistanceBetween(points[i-1], points[i]);
-    if (acc + seg >= target) {
-      const t   = (target - acc) / seg;
-      const lat = points[i-1].lat() + (points[i].lat() - points[i-1].lat()) * t;
-      const lng = points[i-1].lng() + (points[i].lng() - points[i-1].lng()) * t;
-      return {
-        anchorPoint: new google.maps.LatLng(lat, lng),
-        heading: sph.computeHeading(points[i-1], points[i]),
-      };
-    }
-    acc += seg;
-  }
-  return null;
-}
-
 // ─── Find stop that adds N extra minutes ──────────────────────────────────────
 
 /**
- * Uses the Directions API to get the real road polyline, picks an anchor
- * at a random fraction along the actual road, then binary-searches
- * perpendicularly from that road point until the detour adds exactly
- * `extraMinutes` (within ~1 minute tolerance).
- *
- * Falls back to geographic-midpoint search if the Directions API is unavailable.
+ * Randomly picks a direction from the route midpoint, measures how many extra
+ * minutes that point adds, then scales the radius up or down proportionally
+ * until the detour matches the target within ~1.5 minutes.
  */
 async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
-  const TOLERANCE_SECS = 60; // within 1 minute of target is good enough
+  const TOLERANCE_SECS = 90;
+  const MAX_ATTEMPTS   = 20;
 
-  // Step 1: get the real road polyline + direct duration.
-  const route = await getDirectionsRoute(pickup, dropoff);
-
-  if (!route) return null;
-
-  // Use the same API as the leg checks so the baseline and detour times are comparable.
   const directSecs = await fetchDuration(pickup, dropoff);
   if (directSecs == null) return null;
 
-  const fraction = 0.3 + Math.random() * 0.4;
-  const getAnchorInfo = () => routePointInfo(route.points, fraction);
-
   const targetSecs = directSecs + extraMinutes * 60;
-  const anchorInfo = getAnchorInfo();
-  if (!anchorInfo) return null;
+  const mid = { lat: (pickup.lat + dropoff.lat) / 2, lng: (pickup.lng + dropoff.lng) / 2 };
 
-  const { anchorPoint, heading } = anchorInfo;
-  const sph = google.maps.geometry.spherical;
-
-  // Step 2: try both sides of the road; use whichever converges first.
-  const sides = Math.random() < 0.5 ? [90, -90] : [-90, 90];
-
-  for (const offset of sides) {
-    const perpHeading = heading + offset;
-
-    function pointAt(r) {
-      const ll = sph.computeOffset(anchorPoint, r, perpHeading);
-      return { lat: ll.lat(), lng: ll.lng() };
-    }
-
-    // hi: 2 000 m per extra minute (tighter than before — anchor is on the real road).
-    let lo = 0, hi = Math.min(extraMinutes * 2000, 30000);
-    let bestPoint = null, bestD1 = null, bestD2 = null;
-
-    for (let i = 0; i < 10; i++) {
-      const r = (lo + hi) / 2;
-      const raw = pointAt(r);
-
-      // Snap to nearest road — makes duration checks consistent and smooth.
-      const snapped = await snapToRoad(raw.lat, raw.lng);
-      const p = snapped ?? raw; // fall back to unsnapped if Roads API fails
-
-      const [d1, d2] = await Promise.all([fetchDuration(pickup, p), fetchDuration(p, dropoff)]);
-
-      if (d1 == null || d2 == null) {
-        hi = r; // unreachable — shrink search space
-        continue;
-      }
-
-      const total = d1 + d2;
-
-      if (total >= targetSecs) {
-        bestPoint = p; bestD1 = d1; bestD2 = d2;
-        if (total - targetSecs <= TOLERANCE_SECS) break; // within 1 min — done
-        hi = r; // overshoot: try shorter radius
-      } else {
-        lo = r; // undershoot: try longer radius
-      }
-    }
-
-    if (bestPoint) return { ...bestPoint, leg1Secs: bestD1, leg2Secs: bestD2, directSecs };
+  function pointAt(angleDeg, radiusM) {
+    const R = 6371000, a = angleDeg * Math.PI / 180;
+    return {
+      lat: mid.lat + (radiusM * Math.cos(a) / R) * (180 / Math.PI),
+      lng: mid.lng + (radiusM * Math.sin(a) / (R * Math.cos(mid.lat * Math.PI / 180))) * (180 / Math.PI),
+    };
   }
 
+  // Pick a random direction and an initial radius (~600 m per extra minute).
+  const angle  = Math.random() * 360;
+  let radius   = extraMinutes * 600;
+  let bestPoint = null, bestD1 = null, bestD2 = null, bestDiff = Infinity;
+
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    const p = pointAt(angle, radius);
+    const [d1, d2] = await Promise.all([fetchDuration(pickup, p), fetchDuration(p, dropoff)]);
+    if (d1 == null || d2 == null) break;
+
+    const diff = d1 + d2 - targetSecs;
+
+    if (Math.abs(diff) < Math.abs(bestDiff)) {
+      bestPoint = p; bestD1 = d1; bestD2 = d2; bestDiff = diff;
+    }
+
+    if (Math.abs(diff) <= TOLERANCE_SECS) break;
+
+    // Scale radius proportionally: if detour is too short go further, too long come closer.
+    radius *= diff < 0 ? 1.5 : 0.6;
+  }
+
+  if (bestPoint && Math.abs(bestDiff) <= TOLERANCE_SECS) {
+    return { ...bestPoint, leg1Secs: bestD1, leg2Secs: bestD2, directSecs };
+  }
   return null;
 }
 
