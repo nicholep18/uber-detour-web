@@ -469,8 +469,14 @@ async function fetchDuration(from, to) {
   return fetchOSRM(from, to); // fallback if Google Maps API key not set
 }
 
-async function renderTimes(pickup, stop, dropoff) {
-  // Show loading state — no intermediate estimate that changes
+async function renderTimes(pickup, stop, dropoff, precomputed = null) {
+  if (precomputed) {
+    setTimeEl('time-leg1',   precomputed.leg1Secs != null ? fmtDuration(precomputed.leg1Secs) : '—');
+    setTimeEl('time-leg2',   precomputed.leg2Secs != null ? fmtDuration(precomputed.leg2Secs) : '—');
+    setTimeEl('time-direct', precomputed.directSecs != null ? fmtDuration(precomputed.directSecs) : '—', true);
+    return;
+  }
+
   setTimeEl('time-leg1',   '…', false);
   setTimeEl('time-leg2',   '…', false);
   setTimeEl('time-direct', '…', true);
@@ -645,7 +651,7 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
 
     // hi: 2 000 m per extra minute (tighter than before — anchor is on the real road).
     let lo = 0, hi = Math.min(extraMinutes * 2000, 30000);
-    let bestPoint = null;
+    let bestPoint = null, bestD1 = null, bestD2 = null;
 
     for (let i = 0; i < 10; i++) {
       const r = (lo + hi) / 2;
@@ -665,7 +671,7 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
       const total = d1 + d2;
 
       if (total >= targetSecs) {
-        bestPoint = p;
+        bestPoint = p; bestD1 = d1; bestD2 = d2;
         if (total - targetSecs <= TOLERANCE_SECS) break; // within 1 min — done
         hi = r; // overshoot: try shorter radius
       } else {
@@ -673,7 +679,7 @@ async function findStopForExtraMinutes(pickup, dropoff, extraMinutes) {
       }
     }
 
-    if (bestPoint) return bestPoint;
+    if (bestPoint) return { ...bestPoint, leg1Secs: bestD1, leg2Secs: bestD2, directSecs };
   }
 
   return null;
@@ -719,7 +725,7 @@ async function handleGenerateDetour() {
     const extraMinRaw = parseFloat(document.getElementById('extra-minutes').value);
     const extraMin = isFinite(extraMinRaw) && extraMinRaw > 0 ? extraMinRaw : null;
 
-    let sLat, sLng;
+    let sLat, sLng, cachedTimes = null;
     if (extraMin != null) {
       const found = await findStopForExtraMinutes(pickup, dropoff, extraMin);
       if (!found) {
@@ -727,6 +733,7 @@ async function handleGenerateDetour() {
         return;
       }
       sLat = found.lat; sLng = found.lng;
+      cachedTimes = { leg1Secs: found.leg1Secs, leg2Secs: found.leg2Secs, directSecs: found.directSecs };
     } else {
       const mid = midpoint(pickup, dropoff);
       ({ lat: sLat, lng: sLng } = randomNearbyPoint(mid.lat, mid.lng));
@@ -745,7 +752,7 @@ async function handleGenerateDetour() {
       ${stopHTML('#F44336', 'Destination', dropoff.short_name)}`;
 
     document.getElementById('detour-result').classList.remove('hidden');
-    renderTimes(pickup, stop, dropoff); // starts instantly, updates with OSRM in background
+    renderTimes(pickup, stop, dropoff, cachedTimes); // use cached times from binary search when available
   } catch (err) {
     alert(err.message || 'Something went wrong. Please try again.');
   } finally {
